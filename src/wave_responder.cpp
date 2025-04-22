@@ -79,22 +79,38 @@ public:
 
         time_ = 0;
         duration_ = 3.0; // 3 s
+        wave_detected_ = false;
+        finished_action_ = true;
+        handshake_detected_ = false;
         RCLCPP_INFO(this->get_logger(), "Wave Responder Node Initialized");
     }
 
 private:
     void wave_callback(const std_msgs::msg::String::SharedPtr msg)
     {
-        if (msg->data == "Wave detected")
+        if (msg->data == "Wave detected" && !handshake_detected_)
+        // if (msg->data == "Handshake detected" && !wave_detected_)
         {
-            RCLCPP_INFO(this->get_logger(), "Wave detected! Moving ankles.");
+            RCLCPP_INFO(this->get_logger(), "Wave detected! Waving back :)");
+            finished_action_ = false;
+            action_iterator = 0.0;
             wave_detected_ = true;
             wave_start_time_ = this->now().seconds();
+        }
+        else if (msg->data == "Handshake detected" && !wave_detected_)
+        // else if (msg->data == "Wave detected")
+        {
+            RCLCPP_INFO(this->get_logger(), "Handshake detected! Shaking hand :)");
+            finished_action_ = false;
+            action_iterator = 0.0;
+            handshake_detected_ = !handshake_detected_;
+            handshake_start_time_ = this->now().seconds();
         }
     }
     void Control()
     {
         time_ += control_dt_;
+        action_iterator += control_dt_;
         low_command.mode_pr = mode_;
         low_command.mode_machine = mode_machine;
         for (int i = 0; i < G1_NUM_MOTOR; ++i)
@@ -107,24 +123,20 @@ private:
             low_command.motor_cmd[i].kd = 1.0;
         }
 
-        if (wave_detected_ && time_ > duration_) // Wave Action
+        if (wave_detected_ && !handshake_detected_ && !finished_action_ && time_ > duration_) // Wave Action
         {
-            double elapsed = this->now().seconds() - wave_start_time_;
-            if (elapsed > duration_) // Flag if completed
-            {
-                wave_detected_ = false;
-                RCLCPP_INFO(this->get_logger(), "Ankle movement complete.");
-            }
-            else // Do Wave Action
-            {
-                wiggleAnkles();
-            }
+            wave();
         }
+        else if (!wave_detected_ && handshake_detected_ && !finished_action_ && time_ > duration_) // Handshake Action
+        {
+            handshake();
+        }
+
         else // go to initial position
         {
             goToInitialPosition();
         }
-
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
         get_crc(low_command);
         lowcmd_publisher_->publish(low_command);
     }
@@ -190,6 +202,80 @@ private:
         low_command.motor_cmd[G1JointIndex::RightWristRoll].kp = 50;
         low_command.motor_cmd[G1JointIndex::RightWristRoll].kd = 1;
         low_command.motor_cmd[G1JointIndex::RightWristRoll].tau = 0;
+        std::cout << "______________________" << std::endl;
+        std::cout << "Left Ankle Des" << L_P_des << std::endl;
+    }
+
+    void wave()
+    {
+        mode_ = PRorAB::PR; // Enable PR mode
+        // generate sin/cos trajectory
+        double max_shoulder_roll = 1.74533; // [rad]
+        double max_shoulder_yaw = 1.0472;   // [rad]
+        double left_shoulder_roll_target = max_shoulder_roll * 2 * std::sin(2.0 * M_PI * action_iterator);
+        double left_shoulder_yaw_target = max_shoulder_yaw * 2 * std::sin(2.0 * M_PI * action_iterator);
+        left_shoulder_roll_target = clamp(left_shoulder_roll_target, 0, max_shoulder_roll);
+        left_shoulder_yaw_target = clamp(left_shoulder_yaw_target, 0, max_shoulder_yaw);
+
+        float Kp = 30;
+        float Kd = 1;
+
+        // ROLL
+        low_command.motor_cmd[G1JointIndex::LeftShoulderRoll].q = left_shoulder_roll_target;
+        low_command.motor_cmd[G1JointIndex::LeftShoulderRoll].dq = 0.05;
+        low_command.motor_cmd[G1JointIndex::LeftShoulderRoll].kp = Kp;
+        low_command.motor_cmd[G1JointIndex::LeftShoulderRoll].kd = Kd;
+        low_command.motor_cmd[G1JointIndex::LeftShoulderRoll].tau = 0;
+
+        // YAW
+        low_command.motor_cmd[G1JointIndex::LeftShoulderYaw].q = left_shoulder_yaw_target;
+        low_command.motor_cmd[G1JointIndex::LeftShoulderYaw].dq = 0.05;
+        low_command.motor_cmd[G1JointIndex::LeftShoulderYaw].kp = Kp;
+        low_command.motor_cmd[G1JointIndex::LeftShoulderYaw].kd = Kd;
+        low_command.motor_cmd[G1JointIndex::LeftShoulderYaw].tau = 0;
+
+        std::cout << "______________________" << std::endl;
+        std::cout << "finished_action?: " << finished_action_ << std::endl;
+        std::cout << "time: " << action_iterator << std::endl;
+        std::cout << "Left Shoulder Target: " << left_shoulder_roll_target << std::endl;
+        if (std::abs(left_shoulder_roll_target) < 0.001)
+        {
+            finished_action_ = true;
+        }
+    }
+
+    void handshake()
+    {
+        mode_ = PRorAB::PR; // Enable PR mode
+        // generate sin/cos trajectory
+        double max_shoulder_pitch = 0.523599; // [rad]
+        double right_shoulder_pitch_target = max_shoulder_pitch * 2 * std::sin(2.0 * M_PI * clamp(action_iterator, 0, 0.25));
+        right_shoulder_pitch_target = clamp(right_shoulder_pitch_target, 0, max_shoulder_pitch);
+
+        double max_elbow = 0.261799612195482; // [rad]
+        double right_elbo = max_elbow * 2 * std::sin(2.0 * M_PI * clamp(action_iterator, 0, 0.25));
+        right_elbo = clamp(right_elbo, 0, max_elbow);
+
+        float Kp = 30;
+        float Kd = 1;
+
+        // Pitch
+        low_command.motor_cmd[G1JointIndex::RightShoulderPitch].q = -right_shoulder_pitch_target;
+        low_command.motor_cmd[G1JointIndex::RightShoulderPitch].dq = 0.05;
+        low_command.motor_cmd[G1JointIndex::RightShoulderPitch].kp = Kp;
+        low_command.motor_cmd[G1JointIndex::RightShoulderPitch].kd = Kd;
+        low_command.motor_cmd[G1JointIndex::RightShoulderPitch].tau = 0;
+
+        low_command.motor_cmd[G1JointIndex::RightElbow].q = right_elbo;
+        low_command.motor_cmd[G1JointIndex::RightElbow].dq = 0.05;
+        low_command.motor_cmd[G1JointIndex::RightElbow].kp = Kp;
+        low_command.motor_cmd[G1JointIndex::RightElbow].kd = Kd;
+        low_command.motor_cmd[G1JointIndex::RightElbow].tau = 0;
+
+        std::cout << "______________________" << std::endl;
+        std::cout << "finished_action?: " << finished_action_ << std::endl;
+        std::cout << "time: " << action_iterator << std::endl;
+        std::cout << "right Shoulder Target: " << right_shoulder_pitch_target << std::endl;
     }
 
     void LowStateHandler(unitree_hg::msg::LowState::SharedPtr message)
@@ -248,8 +334,12 @@ private:
     int timer_dt = control_dt_ * 1000;
     double time_; // Running time count
     double duration_;
+    double action_iterator;
+    bool finished_action_;
     bool wave_detected_;
+    bool handshake_detected_;
     double wave_start_time_;
+    double handshake_start_time_;
     PRorAB mode_ = PRorAB::PR;
     int mode_machine;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr subscription_;
